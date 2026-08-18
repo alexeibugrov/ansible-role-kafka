@@ -1,0 +1,25 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Restart Kafka
+  ansible.builtin.file:
+    path: "{{ kafka_data_dir }}/.restart-required"
+    state: touch
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: "0640"
+  when: kafka_rolling_restart_deferred | bool
+  listen: Restart Kafka
+
+- name: Restart Kafka immediately
+  ansible.builtin.systemd_service:
+    name: "{{ kafka_service_name }}"
+    state: restarted
+  when: not (kafka_rolling_restart_deferred | bool)
+  listen: Restart Kafka
+  notify: Wait for Kafka to become healthy
+
+- name: Wait for Kafka to become healthy
+  ansible.builtin.include_tasks: health.yml

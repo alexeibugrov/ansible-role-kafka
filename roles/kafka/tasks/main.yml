@@ -1,0 +1,67 @@
+---
+- name: Assert required cluster identity is supplied
+  ansible.builtin.assert:
+    that:
+      - kafka_cluster_id | length > 0
+      - kafka_node_id is defined
+      - kafka_advertised_address | length > 0
+    fail_msg: >-
+      kafka_cluster_id, kafka_node_id and kafka_advertised_address must all be set.
+      The cluster ID and controller directory UUIDs are minted once outside the role
+      (scripts/generate-cluster-identity.sh, or Infisical in production) because
+      regenerating them would reformat the cluster's metadata.
+    quiet: true
+  tags: [always]
+
+- name: Assert SCRAM credentials are supplied when SASL is enabled
+  ansible.builtin.assert:
+    that:
+      - kafka_scram_users | length > 0
+      - kafka_scram_users | map(attribute='name') | select('equalto', kafka_admin_principal) | list | length == 1
+      - kafka_scram_users | map(attribute='name') | select('equalto', kafka_inter_broker_principal) | list | length == 1
+    fail_msg: >-
+      kafka_scram_users must contain at least {{ kafka_admin_principal }} and
+      {{ kafka_inter_broker_principal }}. Supply them from a vaulted file or Infisical;
+      they are deliberately absent from defaults/main.yml.
+    quiet: true
+  when: kafka_sasl_enabled | bool
+  tags: [always]
+
+- name: Install prerequisites
+  ansible.builtin.import_tasks: prerequisites.yml
+  tags: [kafka, kafka_prerequisites]
+
+- name: Install Kafka
+  ansible.builtin.import_tasks: install.yml
+  tags: [kafka, kafka_install]
+
+- name: Configure TLS material
+  ansible.builtin.import_tasks: pki.yml
+  when: kafka_tls_enabled | bool
+  tags: [kafka, kafka_tls]
+
+- name: Install the JMX Exporter agent
+  ansible.builtin.import_tasks: observability.yml
+  when: kafka_metrics_enabled | bool
+  tags: [kafka, kafka_observability]
+
+- name: Render Kafka configuration
+  ansible.builtin.import_tasks: configure.yml
+  tags: [kafka, kafka_configure]
+
+- name: Initialise KRaft storage
+  ansible.builtin.import_tasks: kraft.yml
+  tags: [kafka, kafka_kraft]
+
+- name: Manage the Kafka service
+  ansible.builtin.import_tasks: service.yml
+  tags: [kafka, kafka_service]
+
+- name: Reconcile SCRAM principals
+  ansible.builtin.import_tasks: security.yml
+  when: kafka_sasl_enabled | bool
+  tags: [kafka, kafka_security]
+
+- name: Reconcile topics
+  ansible.builtin.import_tasks: topics.yml
+  tags: [kafka, kafka_topics]

@@ -1,0 +1,99 @@
+{{ ansible_managed | comment }}
+
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+
+rules:
+  - pattern: kafka.server<type=ReplicaManager, name=(UnderReplicatedPartitions|UnderMinIsrPartitionCount|PartitionCount|LeaderCount)><>Value
+    name: kafka_server_replicamanager_$1
+    type: GAUGE
+
+  - pattern: kafka.controller<type=KafkaController, name=(OfflinePartitionsCount|ActiveControllerCount|GlobalTopicCount|GlobalPartitionCount|PreferredReplicaImbalanceCount)><>Value
+    name: kafka_controller_$1
+    type: GAUGE
+
+  - pattern: kafka.server<type=ReplicaManager, name=(IsrShrinksPerSec|IsrExpandsPerSec|FailedIsrUpdatesPerSec)><>Count
+    name: kafka_server_replicamanager_$1_total
+    type: COUNTER
+
+  - pattern: "kafka.server<type=raft-metrics><>current-state: ([a-z]+)"
+    name: kafka_raft_current_state_info
+    value: 1
+    labels:
+      state: "$1"
+    type: GAUGE
+
+  - pattern: kafka.server<type=raft-metrics><>(current-leader|current-epoch|current-vote|high-watermark|log-end-offset|number-unknown-voter-connections)
+    name: kafka_raft_$1
+    type: GAUGE
+
+  - pattern: kafka.server<type=raft-metrics><>(commit-latency-avg|commit-latency-max|election-latency-avg|election-latency-max|fetch-records-rate|append-records-rate)
+    name: kafka_raft_$1
+    type: GAUGE
+
+  - pattern: kafka.server<type=broker-metadata-metrics><>(last-applied-record-offset|last-applied-record-lag-ms|metadata-load-error-count|metadata-apply-error-count)
+    name: kafka_broker_metadata_$1
+    type: GAUGE
+
+  - pattern: kafka.server<type=BrokerTopicMetrics, name=(BytesInPerSec|BytesOutPerSec|MessagesInPerSec|BytesRejectedPerSec|TotalProduceRequestsPerSec|TotalFetchRequestsPerSec|FailedProduceRequestsPerSec|FailedFetchRequestsPerSec), topic=(.+)><>Count
+    name: kafka_server_brokertopicmetrics_$1_total
+    labels:
+      topic: "$2"
+    type: COUNTER
+
+  - pattern: kafka.server<type=BrokerTopicMetrics, name=(BytesInPerSec|BytesOutPerSec|MessagesInPerSec|BytesRejectedPerSec|TotalProduceRequestsPerSec|TotalFetchRequestsPerSec|FailedProduceRequestsPerSec|FailedFetchRequestsPerSec)><>Count
+    name: kafka_server_brokertopicmetrics_$1_total
+    type: COUNTER
+
+  - pattern: kafka.network<type=RequestMetrics, name=(RequestsPerSec), request=(.+), version=(.+)><>Count
+    name: kafka_network_requestmetrics_requests_total
+    labels:
+      request: "$2"
+      version: "$3"
+    type: COUNTER
+
+  - pattern: kafka.network<type=RequestMetrics, name=(TotalTimeMs|RequestQueueTimeMs|LocalTimeMs|RemoteTimeMs|ResponseQueueTimeMs|ResponseSendTimeMs), request=(.+)><>(\d+)thPercentile
+    name: kafka_network_requestmetrics_$1
+    labels:
+      request: "$2"
+      quantile: "0.$3"
+    type: GAUGE
+
+  - pattern: kafka.network<type=RequestMetrics, name=(TotalTimeMs|RequestQueueTimeMs|LocalTimeMs|RemoteTimeMs|ResponseQueueTimeMs|ResponseSendTimeMs), request=(.+)><>(Count|Mean)
+    name: kafka_network_requestmetrics_$1_$3
+    labels:
+      request: "$2"
+    type: GAUGE
+
+  - pattern: kafka.server<type=KafkaRequestHandlerPool, name=RequestHandlerAvgIdlePercent><>OneMinuteRate
+    name: kafka_server_requesthandler_avg_idle_percent
+    type: GAUGE
+
+  - pattern: kafka.network<type=SocketServer, name=NetworkProcessorAvgIdlePercent><>Value
+    name: kafka_network_processor_avg_idle_percent
+    type: GAUGE
+
+  - pattern: kafka.log<type=LogFlushStats, name=LogFlushRateAndTimeMs><>Count
+    name: kafka_log_flush_total
+    type: COUNTER
+
+  - pattern: kafka.log<type=Log, name=(Size|LogEndOffset|LogStartOffset|NumLogSegments), topic=(.+), partition=(.+)><>Value
+    name: kafka_log_$1
+    labels:
+      topic: "$2"
+      partition: "$3"
+    type: GAUGE
+
+  - pattern: kafka.server<type=(.+)-metrics, listener=(.+), networkProcessor=(.+)><>(failed-authentication-total|successful-authentication-total|connection-count)
+    name: kafka_server_$4
+    labels:
+      listener: "$2"
+    type: GAUGE
+
+  - pattern: 'java.lang<type=Memory><(HeapMemoryUsage|NonHeapMemoryUsage)>(used|committed|max)'
+    name: jvm_memory_$1_$2_bytes
+    type: GAUGE
+
+  - pattern: 'java.lang<type=OperatingSystem><>(OpenFileDescriptorCount|MaxFileDescriptorCount|ProcessCpuLoad|SystemCpuLoad|FreePhysicalMemorySize)'
+    name: jvm_os_$1
+    type: GAUGE

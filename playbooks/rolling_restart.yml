@@ -1,0 +1,16 @@
+---
+- name: Rolling restart of the Kafka cluster
+  hosts: "{{ kafka_target | default('kafka') }}"
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    kafka_force_restart: true
+  vars_files:
+    - "{{ playbook_dir }}/../.local/test-secrets.yml"
+    - "{{ playbook_dir }}/../.local/cluster-identity.yml"
+  tasks:
+    - name: Restart this broker and wait for it to rejoin the quorum
+      ansible.builtin.include_role:
+        name: kafka
+        tasks_from: rolling_restart.yml

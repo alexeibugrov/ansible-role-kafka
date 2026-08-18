@@ -1,0 +1,21 @@
+---
+- name: Check whether a restart is owed
+  ansible.builtin.stat:
+    path: "{{ kafka_data_dir }}/.restart-required"
+  register: kafka_restart_marker
+
+- name: Restart this broker and wait for it to rejoin
+  when: kafka_restart_marker.stat.exists or (kafka_force_restart | default(false) | bool)
+  block:
+    - name: Restart Kafka
+      ansible.builtin.systemd_service:
+        name: "{{ kafka_service_name }}"
+        state: restarted
+
+    - name: Wait for Kafka to become healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Clear the restart marker
+      ansible.builtin.file:
+        path: "{{ kafka_data_dir }}/.restart-required"
+        state: absent

@@ -1,0 +1,76 @@
+{{ ansible_managed | comment }}
+# ───────────────
+
+############################# Server Basics #############################
+
+process.roles={{ kafka_process_roles }}
+node.id={{ kafka_node_id }}
+
+controller.quorum.bootstrap.servers={{ kafka_controller_quorum_bootstrap_servers }}
+
+############################# Socket Server Settings #############################
+
+listeners={{ kafka_broker_listener_name }}://{{ kafka_bind_address }}:{{ kafka_broker_port }},{{ kafka_controller_listener_name }}://{{ kafka_bind_address }}:{{ kafka_controller_port }}
+
+advertised.listeners={{ kafka_broker_listener_name }}://{{ kafka_advertised_address }}:{{ kafka_broker_port }}
+
+listener.security.protocol.map={{ kafka_broker_listener_name }}:SASL_SSL,{{ kafka_controller_listener_name }}:SSL
+controller.listener.names={{ kafka_controller_listener_name }}
+inter.broker.listener.name={{ kafka_broker_listener_name }}
+
+num.network.threads={{ kafka_num_network_threads }}
+num.io.threads={{ kafka_num_io_threads }}
+socket.send.buffer.bytes={{ kafka_socket_send_buffer_bytes }}
+socket.receive.buffer.bytes={{ kafka_socket_receive_buffer_bytes }}
+socket.request.max.bytes={{ kafka_socket_request_max_bytes }}
+
+############################# TLS #############################
+
+ssl.keystore.type=PEM
+ssl.keystore.location={{ kafka_tls_dir }}/broker.pem
+ssl.truststore.type=PEM
+ssl.truststore.location={{ kafka_tls_dir }}/ca.crt
+
+listener.name.{{ kafka_controller_listener_name | lower }}.ssl.client.auth=required
+
+ssl.endpoint.identification.algorithm=HTTPS
+
+{% if kafka_sasl_enabled %}
+############################# SASL #############################
+
+sasl.enabled.mechanisms={{ kafka_sasl_mechanism }}
+sasl.mechanism.inter.broker.protocol={{ kafka_sasl_mechanism }}
+
+listener.name.{{ kafka_broker_listener_name | lower }}.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="{{ kafka_inter_broker_principal }}" password="{{ kafka_inter_broker_password }}";
+{% endif %}
+
+############################# Log Basics #############################
+
+log.dirs={{ kafka_log_dirs | join(',') }}
+num.partitions={{ kafka_num_partitions }}
+
+############################# Replication #############################
+
+default.replication.factor={{ kafka_default_replication_factor }}
+min.insync.replicas={{ kafka_min_insync_replicas }}
+offsets.topic.replication.factor={{ kafka_offsets_topic_replication_factor }}
+transaction.state.log.replication.factor={{ kafka_transaction_state_log_replication_factor }}
+transaction.state.log.min.isr={{ kafka_transaction_state_log_min_isr }}
+
+############################# Topics #############################
+
+auto.create.topics.enable={{ kafka_auto_create_topics_enable | lower }}
+
+############################# Log Retention #############################
+
+log.retention.hours={{ kafka_log_retention_hours }}
+log.segment.bytes={{ kafka_log_segment_bytes }}
+log.retention.check.interval.ms={{ kafka_log_retention_check_interval_ms }}
+
+{% if kafka_extra_config %}
+############################# Additional configuration #############################
+
+{% for key, value in kafka_extra_config | dictsort %}
+{{ key }}={{ value }}
+{% endfor %}
+{% endif %}

@@ -1,0 +1,24 @@
+---
+- name: Install the Kafka systemd unit
+  ansible.builtin.template:
+    src: kafka.service.j2
+    dest: "/etc/systemd/system/{{ kafka_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart Kafka
+
+- name: Apply pending systemd changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start Kafka
+  ansible.builtin.systemd_service:
+    name: "{{ kafka_service_name }}"
+    enabled: "{{ kafka_service_enabled }}"
+    state: "{{ kafka_service_state }}"
+  register: kafka_service_result
+
+- name: Wait for Kafka to become healthy
+  ansible.builtin.include_tasks: health.yml

@@ -1,0 +1,166 @@
+---
+- name: Configure externally managed TLS material
+  when: not (kafka_tls_generate_self_signed | bool)
+  block:
+    - name: Assert externally managed certificates are supplied
+      ansible.builtin.assert:
+        that:
+          - kafka_tls_ca_cert_content | length > 0
+          - kafka_tls_cert_content | length > 0
+          - kafka_tls_key_content | length > 0
+        fail_msg: >-
+          kafka_tls_generate_self_signed is false, so kafka_tls_ca_cert_content,
+          kafka_tls_cert_content and kafka_tls_key_content must all be supplied —
+          from Infisical, Vault, or your PKI.
+        quiet: true
+
+    - name: Install the externally managed CA certificate
+      ansible.builtin.copy:
+        content: "{{ kafka_tls_ca_cert_content }}"
+        dest: "{{ kafka_tls_dir }}/ca.crt"
+        owner: "{{ kafka_user }}"
+        group: "{{ kafka_group }}"
+        mode: "0644"
+      notify: Restart Kafka
+
+    - name: Install the externally managed broker keypair
+      ansible.builtin.copy:
+        content: "{{ kafka_tls_cert_content }}\n{{ kafka_tls_key_content }}\n"
+        dest: "{{ kafka_tls_dir }}/broker.pem"
+        owner: "{{ kafka_user }}"
+        group: "{{ kafka_group }}"
+        mode: "0600"
+      no_log: true
+      notify: Restart Kafka
+
+- name: Build the internal CA and issue broker certificates
+  when: kafka_tls_generate_self_signed | bool
+  block:
+    - name: Create the local CA directory
+      ansible.builtin.file:
+        path: "{{ kafka_tls_local_ca_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Generate the CA private key
+      community.crypto.openssl_privatekey:
+        path: "{{ kafka_tls_local_ca_dir }}/ca.key"
+        size: "{{ kafka_tls_key_size }}"
+        type: RSA
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Generate the CA signing request
+      community.crypto.openssl_csr:
+        path: "{{ kafka_tls_local_ca_dir }}/ca.csr"
+        privatekey_path: "{{ kafka_tls_local_ca_dir }}/ca.key"
+        common_name: "{{ kafka_tls_ca_common_name }}"
+        basic_constraints:
+          - "CA:TRUE"
+        basic_constraints_critical: true
+        key_usage:
+          - keyCertSign
+          - cRLSign
+        key_usage_critical: true
+        mode: "0644"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Self-sign the CA certificate
+      community.crypto.x509_certificate:
+        path: "{{ kafka_tls_local_ca_dir }}/ca.crt"
+        csr_path: "{{ kafka_tls_local_ca_dir }}/ca.csr"
+        privatekey_path: "{{ kafka_tls_local_ca_dir }}/ca.key"
+        provider: selfsigned
+        selfsigned_not_after: "+{{ kafka_tls_ca_validity_days }}d"
+        mode: "0644"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Create the broker TLS directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ kafka_user }}"
+        group: "{{ kafka_group }}"
+        mode: "0750"
+      loop:
+        - "{{ kafka_tls_dir }}"
+        - "{{ kafka_tls_dir }}/parts"
+
+    - name: Generate the broker private key
+      community.crypto.openssl_privatekey:
+        path: "{{ kafka_tls_dir }}/parts/02-broker.key"
+        size: "{{ kafka_tls_key_size }}"
+        type: RSA
+        format: pkcs8
+        owner: "{{ kafka_user }}"
+        group: "{{ kafka_group }}"
+        mode: "0600"
+
+    - name: Generate the broker signing request
+      community.crypto.openssl_csr:
+        path: "{{ kafka_tls_dir }}/parts/broker.csr"
+        privatekey_path: "{{ kafka_tls_dir }}/parts/02-broker.key"
+        common_name: "{{ inventory_hostname }}"
+        subject_alt_name: "{{ kafka_tls_san_entries }}"
+        key_usage:
+          - digitalSignature
+          - keyEncipherment
+        extended_key_usage:
+          - serverAuth
+          - clientAuth
+        owner: "{{ kafka_user }}"
+        group: "{{ kafka_group }}"
+        mode: "0644"
+
+    - name: Read the broker signing request
+      ansible.builtin.slurp:
+        src: "{{ kafka_tls_dir }}/parts/broker.csr"
+      register: kafka_broker_csr
+
+    - name: Sign the broker certificate with the internal CA
+      community.crypto.x509_certificate:
+        path: "{{ kafka_tls_local_ca_dir }}/{{ inventory_hostname }}.crt"
+        csr_content: "{{ kafka_broker_csr.content | b64decode }}"
+        provider: ownca
+        ownca_path: "{{ kafka_tls_local_ca_dir }}/ca.crt"
+        ownca_privatekey_path: "{{ kafka_tls_local_ca_dir }}/ca.key"
+        ownca_not_after: "+{{ kafka_tls_cert_validity_days }}d"
+        mode: "0644"
+      delegate_to: localhost
+      become: false
+
+    - name: Install the signed broker certificate
+      ansible.builtin.copy:
+        src: "{{ kafka_tls_local_ca_dir }}/{{ inventory_hostname }}.crt"
+        dest: "{{ kafka_tls_dir }}/parts/01-broker.crt"
+        owner: "{{ kafka_user }}"
+        group: "{{ kafka_group }}"
+        mode: "0644"
+
+    - name: Assemble the broker PEM keystore
+      ansible.builtin.assemble:
+        src: "{{ kafka_tls_dir }}/parts"
+        dest: "{{ kafka_tls_dir }}/broker.pem"
+        regexp: '^0[12]-broker\.(crt|key)$'
+        owner: "{{ kafka_user }}"
+        group: "{{ kafka_group }}"
+        mode: "0600"
+      notify: Restart Kafka
+
+    - name: Install the CA certificate as the truststore
+      ansible.builtin.copy:
+        src: "{{ kafka_tls_local_ca_dir }}/ca.crt"
+        dest: "{{ kafka_tls_dir }}/ca.crt"
+        owner: "{{ kafka_user }}"
+        group: "{{ kafka_group }}"
+        mode: "0644"
+      notify: Restart Kafka

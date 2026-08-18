@@ -1,0 +1,27 @@
+---
+kafka_version: "4.3.1"
+
+kafka_heap_opts: "-Xms6g -Xmx6g"
+
+kafka_data_dir: /var/lib/kafka
+kafka_log_dirs:
+  - /data/kafka
+
+kafka_tls_enabled: true
+
+kafka_tls_generate_self_signed: true
+
+kafka_tls_extra_sans:
+  - "DNS:kafka.internal.example.com"
+
+kafka_topics:
+  - name: analytics.events
+    partitions: 6
+    replication_factor: 3
+    config:
+      cleanup.policy: delete
+      retention.ms: 604800000
+      min.insync.replicas: 2
+
+kafka_metrics_enabled: true
+kafka_jmx_exporter_version: "1.6.0"

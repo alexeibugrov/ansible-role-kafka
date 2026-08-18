@@ -1,0 +1,48 @@
+---
+- name: Install Java and supporting packages
+  ansible.builtin.apt:
+    name: "{{ kafka_java_packages + ['ca-certificates', 'python3-cryptography'] }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the Kafka group
+  ansible.builtin.group:
+    name: "{{ kafka_group }}"
+    system: true
+    state: present
+
+- name: Create the Kafka user
+  ansible.builtin.user:
+    name: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ kafka_data_dir }}"
+    create_home: false
+    state: present
+
+- name: Create the Kafka directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ kafka_install_root }}", mode: "0755" }
+    - { path: "{{ kafka_releases_dir }}", mode: "0755" }
+    - { path: "{{ kafka_download_dir }}", mode: "0755" }
+    - { path: "{{ kafka_config_dir }}", mode: "0750" }
+    - { path: "{{ kafka_data_dir }}", mode: "0750" }
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Create the Kafka log directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: "0750"
+  loop: "{{ kafka_log_dirs }}"

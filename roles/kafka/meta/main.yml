@@ -1,0 +1,25 @@
+---
+galaxy_info:
+  role_name: kafka
+  namespace: alexeibugrov
+  author: Aleksei Bugrov
+  description: >-
+    Deploys a vanilla Apache Kafka cluster in KRaft mode on Linux hosts, with TLS,
+    SASL/SCRAM-SHA-512, declarative topic management and Prometheus JMX Exporter metrics.
+  license: MIT
+  min_ansible_version: "2.15"
+
+  platforms:
+    - name: Ubuntu
+      versions:
+        - noble
+
+  galaxy_tags:
+    - kafka
+    - kraft
+    - streaming
+    - messaging
+    - tls
+    - sasl
+
+dependencies: []

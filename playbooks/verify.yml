@@ -1,0 +1,367 @@
+---
+- name: Verify the Kafka cluster
+  hosts: "{{ kafka_target | default('kafka') }}"
+  become: true
+  gather_facts: true
+  vars_files:
+    - "{{ playbook_dir }}/../roles/kafka/defaults/main.yml"
+    - "{{ playbook_dir }}/../.local/test-secrets.yml"
+    - "{{ playbook_dir }}/../.local/cluster-identity.yml"
+  vars:
+    kafka_verify_topic: "analytics.events"
+    kafka_verify_events:
+      - '{"event":"login","user_id":"test-1"}'
+      - '{"event":"page_view","user_id":"test-2"}'
+      - '{"event":"purchase","user_id":"test-3"}'
+
+  tasks:
+    - name: Collect the Kafka service state
+      ansible.builtin.systemd_service:
+        name: "{{ kafka_service_name }}"
+      register: kafka_unit
+      changed_when: false
+
+    - name: Assert Kafka is active and enabled
+      ansible.builtin.assert:
+        that:
+          - kafka_unit.status.ActiveState == "active"
+          - kafka_unit.status.UnitFileState == "enabled"
+        fail_msg: >-
+          Kafka is {{ kafka_unit.status.ActiveState }} / {{ kafka_unit.status.UnitFileState }}
+          on {{ inventory_hostname }}.
+        success_msg: "Kafka active and enabled on {{ inventory_hostname }}"
+
+    - name: Read listening sockets
+      ansible.builtin.command: ss -lntp
+      register: kafka_sockets
+      changed_when: false
+
+    - name: Assert the expected listeners are bound to the private address
+      ansible.builtin.assert:
+        that:
+          - kafka_sockets.stdout is search((kafka_advertised_address | regex_escape) ~ '\]?:' ~ kafka_broker_port)
+          - kafka_sockets.stdout is search((kafka_advertised_address | regex_escape) ~ '\]?:' ~ kafka_controller_port)
+          - kafka_sockets.stdout is search((kafka_advertised_address | regex_escape) ~ '\]?:' ~ kafka_jmx_exporter_port)
+        fail_msg: "Expected Kafka listeners not bound on {{ kafka_advertised_address }}"
+        success_msg: "BROKER/CONTROLLER/metrics bound on the private address only"
+
+    - name: Read the Kafka process command line
+      ansible.builtin.shell:
+        cmd: set -o pipefail; tr '\0' '\n' < /proc/$(systemctl show -p MainPID --value {{ kafka_service_name }})/cmdline
+        executable: /bin/bash
+      register: kafka_cmdline
+      changed_when: false
+
+    - name: Assert insecure JMX remoting is disabled and no RMI port is listening
+      ansible.builtin.assert:
+        that:
+          - kafka_cmdline.stdout is not search('jmxremote=true')
+          - kafka_cmdline.stdout is not search('jmxremote\.port')
+          - kafka_cmdline.stdout is not search('jmxremote\.authenticate=false')
+          - kafka_sockets.stdout is not search(':9999')
+        fail_msg: >-
+          Insecure JMX remoting is active:
+          {{ kafka_cmdline.stdout_lines | select('search', 'jmxremote') | list }}
+        success_msg: "JMX remoting disabled; metrics served only by the in-process agent"
+
+    - name: Read the broker certificate
+      community.crypto.x509_certificate_info:
+        path: "{{ kafka_tls_dir }}/parts/01-broker.crt"
+      register: kafka_cert
+
+    - name: Assert the certificate has correct SANs, validity and issuer
+      ansible.builtin.assert:
+        that:
+          - "'DNS:' ~ inventory_hostname in kafka_cert.subject_alt_name"
+          - "'IP:' ~ kafka_advertised_address in kafka_cert.subject_alt_name"
+          - kafka_cert.expired == false
+          - kafka_tls_ca_common_name in (kafka_cert.issuer.commonName | default(''))
+        fail_msg: >-
+          Certificate SANs {{ kafka_cert.subject_alt_name }} / issuer
+          {{ kafka_cert.issuer }} are not as expected.
+        success_msg: >-
+          Certificate valid until {{ kafka_cert.not_after }}, SANs
+          {{ kafka_cert.subject_alt_name | join(', ') }}
+
+    - name: Verify the TLS handshake validates against the internal CA
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          openssl s_client -connect {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          -CAfile {{ kafka_tls_dir }}/ca.crt
+          -verify_return_error -brief </dev/null 2>&1
+        executable: /bin/bash
+      register: kafka_tls_handshake
+      changed_when: false
+
+    - name: Assert the TLS chain verifies
+      ansible.builtin.assert:
+        that:
+          - kafka_tls_handshake.rc == 0
+          - kafka_tls_handshake.stdout is search('Verification: OK')
+        fail_msg: "TLS verification failed: {{ kafka_tls_handshake.stdout }}"
+        success_msg: "TLS chain verifies against the internal CA"
+
+    - name: Attempt a TLS handshake without trusting the CA
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          openssl s_client -connect {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          -CApath /nonexistent -verify_return_error -brief </dev/null 2>&1
+        executable: /bin/bash
+      register: kafka_tls_untrusted
+      failed_when: false
+      changed_when: false
+
+    - name: Assert an untrusted client is rejected
+      ansible.builtin.assert:
+        that:
+          - kafka_tls_untrusted.rc != 0
+        fail_msg: "A client not trusting the internal CA completed the handshake"
+        success_msg: "Untrusted client correctly rejected by TLS verification"
+
+    - name: Authenticate with valid SCRAM credentials
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-broker-api-versions.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --command-config {{ kafka_config_dir }}/admin.properties
+      become: true
+      become_user: "{{ kafka_user }}"
+      register: kafka_auth_ok
+      changed_when: false
+
+    - name: Write a client configuration with a wrong password
+      ansible.builtin.copy:
+        content: |
+          security.protocol=SASL_SSL
+          sasl.mechanism=SCRAM-SHA-512
+          sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule \
+            required username="{{ kafka_admin_principal }}" password="definitely-not-the-password";
+          ssl.truststore.type=PEM
+          ssl.truststore.location={{ kafka_tls_dir }}/ca.crt
+        dest: "/tmp/kafka-verify-badauth.properties"
+        owner: "{{ kafka_user }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Attempt to connect with invalid credentials
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-broker-api-versions.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --command-config /tmp/kafka-verify-badauth.properties
+      become: true
+      become_user: "{{ kafka_user }}"
+      register: kafka_auth_bad
+      failed_when: false
+      changed_when: false
+
+    - name: Assert invalid credentials are rejected
+      ansible.builtin.assert:
+        that:
+          - kafka_auth_ok.rc == 0
+          - kafka_auth_bad.rc != 0
+          - kafka_auth_bad.stderr is search('SaslAuthenticationException|Authentication failed')
+        fail_msg: >-
+          Authentication behaviour wrong. valid rc={{ kafka_auth_ok.rc }},
+          invalid rc={{ kafka_auth_bad.rc }}.
+        success_msg: "Valid SCRAM credentials accepted; invalid credentials rejected"
+
+    - name: Attempt an unauthenticated PLAINTEXT connection
+      ansible.builtin.copy:
+        content: |
+          security.protocol=PLAINTEXT
+        dest: "/tmp/kafka-verify-plaintext.properties"
+        owner: "{{ kafka_user }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Probe for a PLAINTEXT listener
+      ansible.builtin.command:
+        cmd: >-
+          timeout 20 {{ kafka_current_dir }}/bin/kafka-broker-api-versions.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --command-config /tmp/kafka-verify-plaintext.properties
+      become: true
+      become_user: "{{ kafka_user }}"
+      register: kafka_plaintext_probe
+      failed_when: false
+      changed_when: false
+
+    - name: Assert no PLAINTEXT listener answers
+      ansible.builtin.assert:
+        that:
+          - kafka_plaintext_probe.rc != 0
+        fail_msg: "A PLAINTEXT client got a response — an unencrypted listener is exposed"
+        success_msg: "No PLAINTEXT listener available"
+
+    - name: Remove the verification client configurations
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/kafka-verify-badauth.properties
+        - /tmp/kafka-verify-plaintext.properties
+      changed_when: false
+
+    - name: Read Kafka's journal
+      ansible.builtin.command: journalctl -u {{ kafka_service_name }} --no-pager -n 200
+      register: kafka_journal
+      changed_when: false
+
+    - name: Assert journald carries Kafka operational logs
+      ansible.builtin.assert:
+        that:
+          - kafka_journal.stdout_lines | length > 10
+          - kafka_journal.stdout is search('INFO|Kafka')
+        fail_msg: "journalctl -u {{ kafka_service_name }} returned no useful Kafka logs"
+        success_msg: "journald carries Kafka operational logs ({{ kafka_journal.stdout_lines | length }} recent lines)"
+
+    - name: Scrape the JMX Exporter
+      ansible.builtin.uri:
+        url: "http://{{ kafka_advertised_address }}:{{ kafka_jmx_exporter_port }}/metrics"
+        return_content: true
+      register: kafka_metrics
+
+    - name: Assert Kafka, KRaft and JVM metric families are present
+      ansible.builtin.assert:
+        that:
+          - kafka_metrics.content is search('kafka_server_brokertopicmetrics_bytesinpersec_total')
+          - kafka_metrics.content is search('kafka_server_replicamanager_underreplicatedpartitions')
+          - kafka_metrics.content is search('kafka_controller_activecontrollercount')
+          - kafka_metrics.content is search('kafka_raft_')
+          - kafka_metrics.content is search('jvm_memory_heapmemoryusage_used_bytes')
+          - kafka_metrics.content is search('jvm_gc_collection_seconds_count')
+        fail_msg: "Expected Kafka/KRaft/JVM metric families missing from /metrics"
+        success_msg: >-
+          /metrics exposes Kafka, KRaft and JVM families
+          ({{ kafka_metrics.content_length | default(kafka_metrics.content | length) }} bytes)
+
+- name: Verify cluster-wide state
+  hosts: "{{ kafka_target | default('kafka') }}[0]"
+  become: true
+  vars_files:
+    - "{{ playbook_dir }}/../roles/kafka/defaults/main.yml"
+    - "{{ playbook_dir }}/../.local/test-secrets.yml"
+    - "{{ playbook_dir }}/../.local/cluster-identity.yml"
+  vars:
+    kafka_verify_topic: "analytics.events"
+
+  tasks:
+    - name: Describe the KRaft quorum
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-metadata-quorum.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --command-config {{ kafka_config_dir }}/admin.properties
+          describe --status
+      become: true
+      become_user: "{{ kafka_user }}"
+      register: kafka_quorum
+      changed_when: false
+
+    - name: Describe the quorum replication state
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-metadata-quorum.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --command-config {{ kafka_config_dir }}/admin.properties
+          describe --replication
+      become: true
+      become_user: "{{ kafka_user }}"
+      register: kafka_quorum_replication
+      changed_when: false
+
+    - name: Assert the quorum has a leader and all three controllers
+      ansible.builtin.assert:
+        that:
+          - kafka_quorum.stdout is search('LeaderId:\s*[0-9]+')
+          - kafka_quorum.stdout is search('ClusterId:\s*' ~ kafka_cluster_id)
+          - kafka_quorum_replication.stdout_lines | select('search', 'Follower|Leader') | list | length >= 3
+        fail_msg: "KRaft quorum unhealthy:\n{{ kafka_quorum.stdout }}"
+        success_msg: "KRaft quorum healthy with a leader and 3 voters"
+
+    - name: List registered brokers
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-broker-api-versions.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --command-config {{ kafka_config_dir }}/admin.properties
+      become: true
+      become_user: "{{ kafka_user }}"
+      register: kafka_brokers
+      changed_when: false
+
+    - name: Assert all three brokers are registered
+      ansible.builtin.assert:
+        that:
+          - "kafka_brokers.stdout_lines | select('search', '\\(id: [0-9]+') | list | length == 3"
+        fail_msg: "Expected 3 registered brokers:\n{{ kafka_brokers.stdout }}"
+        success_msg: "All three brokers registered"
+
+    - name: Describe the analytics topic
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-topics.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --command-config {{ kafka_config_dir }}/admin.properties
+          --describe --topic {{ kafka_verify_topic }}
+      become: true
+      become_user: "{{ kafka_user }}"
+      register: kafka_topic_state
+      changed_when: false
+
+    - name: Assert the topic shape and replica distribution
+      ansible.builtin.assert:
+        that:
+          - kafka_topic_state.stdout is search('PartitionCount:\s*6')
+          - kafka_topic_state.stdout is search('ReplicationFactor:\s*3')
+          - kafka_topic_state.stdout is search('min.insync.replicas=2')
+          - kafka_topic_state.stdout is search('retention.ms=604800000')
+          - "kafka_topic_state.stdout_lines | select('search', 'Replicas: [0-9]+,[0-9]+,[0-9]+') | list | length == 6"
+        fail_msg: "Topic not as declared:\n{{ kafka_topic_state.stdout }}"
+        success_msg: "analytics.events: 6 partitions, RF 3, minISR 2, 7-day retention, replicas spread across 3 brokers"
+
+    - name: Produce JSON analytics events over SASL_SSL
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          printf '%s\n' {{ kafka_verify_events | map('quote') | join(' ') }} |
+          {{ kafka_current_dir }}/bin/kafka-console-producer.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --producer.config {{ kafka_config_dir }}/admin.properties
+          --topic {{ kafka_verify_topic }}
+        executable: /bin/bash
+      become: true
+      become_user: "{{ kafka_user }}"
+      vars:
+        kafka_verify_events:
+          - '{"event":"login","user_id":"test-1"}'
+          - '{"event":"page_view","user_id":"test-2"}'
+          - '{"event":"purchase","user_id":"test-3"}'
+      register: kafka_produce
+      changed_when: true
+
+    - name: Consume the events back
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-console-consumer.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --consumer.config {{ kafka_config_dir }}/admin.properties
+          --topic {{ kafka_verify_topic }}
+          --from-beginning --max-messages 3 --timeout-ms 60000
+      become: true
+      become_user: "{{ kafka_user }}"
+      register: kafka_consume
+      changed_when: false
+
+    - name: Assert the produced events were consumed back
+      ansible.builtin.assert:
+        that:
+          - kafka_consume.stdout_lines | select('search', '"event"') | list | length == 3
+          - kafka_consume.stdout is search('"user_id":"test-1"')
+          - kafka_consume.stdout is search('"user_id":"test-2"')
+          - kafka_consume.stdout is search('"user_id":"test-3"')
+        fail_msg: "Expected 3 JSON events, got:\n{{ kafka_consume.stdout }}"
+        success_msg: "Produced and consumed 3 JSON events over SASL_SSL + SCRAM-SHA-512"

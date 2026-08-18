@@ -1,0 +1,48 @@
+---
+- name: Create the JMX Exporter directory
+  ansible.builtin.file:
+    path: "{{ kafka_jmx_exporter_dir }}"
+    state: directory
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: "0755"
+
+- name: Fetch the published JMX Exporter checksum
+  when: kafka_jmx_exporter_sha256 | length == 0
+  block:
+    - name: Download the JMX Exporter SHA-256 sidecar
+      ansible.builtin.uri:
+        url: "{{ kafka_jmx_exporter_url }}.sha256"
+        return_content: true
+      register: kafka_jmx_published_checksum
+      changed_when: false
+
+    - name: Extract the JMX Exporter digest
+      ansible.builtin.set_fact:
+        kafka_jmx_exporter_sha256: "{{ kafka_jmx_published_checksum.content.split()[0] | trim | lower }}"
+
+    - name: Assert the JMX Exporter digest is well formed
+      ansible.builtin.assert:
+        that:
+          - kafka_jmx_exporter_sha256 is match('^[0-9a-f]{64}$')
+        fail_msg: "Could not parse a SHA-256 digest from {{ kafka_jmx_exporter_url }}.sha256"
+        quiet: true
+
+- name: Download the JMX Exporter agent
+  ansible.builtin.get_url:
+    url: "{{ kafka_jmx_exporter_url }}"
+    dest: "{{ kafka_jmx_exporter_jar }}"
+    checksum: "sha256:{{ kafka_jmx_exporter_sha256 }}"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: "0644"
+  notify: Restart Kafka
+
+- name: Install the JMX Exporter configuration
+  ansible.builtin.template:
+    src: jmx-exporter.yml.j2
+    dest: "{{ kafka_jmx_exporter_config }}"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: "0644"
+  notify: Restart Kafka

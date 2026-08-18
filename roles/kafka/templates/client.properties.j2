@@ -1,0 +1,9 @@
+{{ ansible_managed | comment }}
+
+security.protocol=SASL_SSL
+sasl.mechanism={{ kafka_sasl_mechanism }}
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="{{ client_principal }}" password="{{ client_password }}";
+
+ssl.truststore.type=PEM
+ssl.truststore.location={{ kafka_tls_dir }}/ca.crt
+ssl.endpoint.identification.algorithm=HTTPS

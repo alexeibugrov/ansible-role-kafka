@@ -1,0 +1,66 @@
+---
+- name: Check whether KRaft storage is already initialised
+  ansible.builtin.stat:
+    path: "{{ kafka_log_dirs[0] }}/meta.properties"
+  register: kafka_meta_properties
+
+- name: Read the existing cluster identity
+  ansible.builtin.slurp:
+    src: "{{ kafka_log_dirs[0] }}/meta.properties"
+  register: kafka_meta_content
+  when: kafka_meta_properties.stat.exists
+
+- name: Extract the cluster ID recorded on disk
+  ansible.builtin.set_fact:
+    kafka_existing_cluster_id: >-
+      {{ (kafka_meta_content.content | b64decode)
+         | regex_search('^cluster\.id=(.+)$', '\1', multiline=True) | first | default('') | trim }}
+  when: kafka_meta_properties.stat.exists
+
+- name: Fail when the node belongs to a different cluster
+  ansible.builtin.fail:
+    msg: >-
+      {{ inventory_hostname }} has KRaft storage initialised with cluster ID
+      '{{ kafka_existing_cluster_id }}', but this play expects '{{ kafka_cluster_id }}'.
+      Refusing to reformat, because that would destroy the data in
+      {{ kafka_log_dirs | join(', ') }}. Investigate whether this host is a leftover
+      from a previous cluster; if the data is genuinely disposable, remove the log
+      directories by hand and re-run.
+  when:
+    - kafka_meta_properties.stat.exists
+    - kafka_existing_cluster_id | length > 0
+    - kafka_existing_cluster_id != kafka_cluster_id
+
+- name: Format KRaft storage
+  when: not kafka_meta_properties.stat.exists
+  block:
+    - name: Assert controller directory IDs are supplied for every node
+      ansible.builtin.assert:
+        that:
+          - kafka_controller_directory_ids | length >= (kafka_cluster_members | length)
+          - kafka_cluster_members
+            | map(attribute='inventory_hostname')
+            | difference(kafka_controller_directory_ids.keys() | list) | length == 0
+        fail_msg: >-
+          kafka_controller_directory_ids must contain an entry for every node in the
+          '{{ kafka_cluster_group }}' group. These UUIDs are written into each node's
+          metadata at format time and can never change, so they are minted once
+          outside the role (scripts/generate-cluster-identity.sh) rather than being
+          generated here, where each host would invent a different value and the
+          quorum would never form.
+        quiet: true
+
+    - name: Initialise the KRaft metadata log
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-storage.sh format
+          --cluster-id {{ kafka_cluster_id }}
+          --initial-controllers {{ kafka_initial_controllers }}
+          --config {{ kafka_config_dir }}/server.properties
+          {% for user in kafka_scram_users if user.name in kafka_bootstrap_principals %}
+          --add-scram 'SCRAM-SHA-512=[name="{{ user.name }}",password="{{ user.password }}"]'
+          {% endfor %}
+        creates: "{{ kafka_log_dirs[0] }}/meta.properties"
+      become: true
+      become_user: "{{ kafka_user }}"
+      no_log: true

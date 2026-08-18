@@ -1,0 +1,40 @@
+
+Configuration:
+  Properties:
+    Property:
+      - name: "logPattern"
+        value: "[%d] %p %m (%c)%n"
+
+  Appenders:
+    Console:
+      name: STDOUT
+      PatternLayout:
+        pattern: "${logPattern}"
+
+  Loggers:
+    Root:
+      level: {{ kafka_log_level }}
+      AppenderRef:
+        - ref: STDOUT
+
+    Logger:
+      - name: kafka
+        level: {{ kafka_log_level }}
+
+      - name: org.apache.kafka
+        level: {{ kafka_log_level }}
+
+      - name: kafka.request.logger
+        level: WARN
+
+      - name: kafka.network.RequestChannel$
+        level: WARN
+
+      - name: org.apache.kafka.controller
+        level: {{ kafka_controller_log_level }}
+
+      - name: org.apache.kafka.storage.internals.log.LogCleaner
+        level: INFO
+
+      - name: kafka.authorizer.logger
+        level: {{ kafka_authorizer_log_level }}

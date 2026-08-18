@@ -1,0 +1,41 @@
+---
+kafka_tls_san_entries: >-
+  {{ (['DNS:' ~ inventory_hostname,
+       'IP:' ~ kafka_advertised_address,
+       'DNS:localhost',
+       'IP:127.0.0.1']
+      + (['DNS:' ~ kafka_private_dns]
+         if kafka_private_dns is defined and kafka_private_dns | length > 0
+         else [])
+      + kafka_tls_extra_sans) | unique }}
+
+kafka_cluster_members: >-
+  {{ groups[kafka_cluster_group]
+     | map('extract', hostvars)
+     | selectattr('kafka_node_id', 'defined')
+     | sort(attribute='kafka_node_id')
+     | list }}
+
+kafka_controller_quorum_bootstrap_servers: >-
+  {%- set endpoints = [] -%}
+  {%- for member in kafka_cluster_members -%}
+  {%- set _ = endpoints.append(
+        (member.kafka_advertised_address
+         | default(member.kafka_private_ip
+                   | default(member.ansible_default_ipv4.address, true), true))
+        ~ ':' ~ kafka_controller_port) -%}
+  {%- endfor -%}
+  {{ endpoints | join(',') }}
+
+kafka_initial_controllers: >-
+  {%- set entries = [] -%}
+  {%- for member in kafka_cluster_members -%}
+  {%- set _ = entries.append(
+        member.kafka_node_id | string ~ '@' ~
+        (member.kafka_advertised_address
+         | default(member.kafka_private_ip
+                   | default(member.ansible_default_ipv4.address, true), true)) ~ ':' ~
+        kafka_controller_port | string ~ ':' ~
+        kafka_controller_directory_ids[member.inventory_hostname]) -%}
+  {%- endfor -%}
+  {{ entries | join(',') }}

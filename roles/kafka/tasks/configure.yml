@@ -1,0 +1,33 @@
+---
+- name: Resolve the inter-broker credential
+  ansible.builtin.set_fact:
+    kafka_inter_broker_password: >-
+      {{ (kafka_scram_users | selectattr('name', 'equalto', kafka_inter_broker_principal) | first).password }}
+    kafka_admin_password: >-
+      {{ (kafka_scram_users | selectattr('name', 'equalto', kafka_admin_principal) | first).password }}
+  no_log: true
+  when: kafka_sasl_enabled | bool
+
+- name: Render server.properties
+  ansible.builtin.template:
+    src: server.properties.j2
+    dest: "{{ kafka_config_dir }}/server.properties"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: "0640"
+    validate: "test -s %s"
+  no_log: true
+  notify: Restart Kafka
+
+- name: Render the admin client configuration
+  ansible.builtin.template:
+    src: client.properties.j2
+    dest: "{{ kafka_config_dir }}/admin.properties"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: "0640"
+  vars:
+    client_principal: "{{ kafka_admin_principal }}"
+    client_password: "{{ kafka_admin_password }}"
+  no_log: true
+  when: kafka_sasl_enabled | bool

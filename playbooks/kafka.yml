@@ -1,0 +1,24 @@
+---
+- name: Converge the Kafka cluster
+  hosts: "{{ kafka_target | default('kafka') }}"
+  become: true
+  vars:
+    kafka_rolling_restart_deferred: true
+  vars_files:
+    - "{{ playbook_dir }}/../.local/test-secrets.yml"
+    - "{{ playbook_dir }}/../.local/cluster-identity.yml"
+  roles:
+    - kafka
+
+- name: Apply pending restarts one broker at a time
+  hosts: "{{ kafka_target | default('kafka') }}"
+  become: true
+  serial: 1
+  vars_files:
+    - "{{ playbook_dir }}/../.local/test-secrets.yml"
+    - "{{ playbook_dir }}/../.local/cluster-identity.yml"
+  tasks:
+    - name: Roll this broker if a restart is owed
+      ansible.builtin.include_role:
+        name: kafka
+        tasks_from: rolling_restart.yml

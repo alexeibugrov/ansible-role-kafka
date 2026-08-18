@@ -1,0 +1,140 @@
+---
+- name: Reconcile Kafka topics
+  run_once: true
+  delegate_to: "{{ kafka_cluster_members[0].inventory_hostname }}"
+  block:
+    - name: List existing topics
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-topics.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --command-config {{ kafka_config_dir }}/admin.properties
+          --list
+      become: true
+      become_user: "{{ kafka_user }}"
+      register: kafka_existing_topics
+      changed_when: false
+
+    - name: Create missing topics
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-topics.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --command-config {{ kafka_config_dir }}/admin.properties
+          --create --topic {{ item.name }}
+          --partitions {{ item.partitions }}
+          --replication-factor {{ item.replication_factor }}
+          {% for key, value in (item.config | default({})) | dictsort %}
+          --config {{ key }}={{ value }}
+          {% endfor %}
+      become: true
+      become_user: "{{ kafka_user }}"
+      loop: "{{ kafka_topics }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: item.name not in kafka_existing_topics.stdout_lines
+      register: kafka_topic_create
+      changed_when: kafka_topic_create.rc == 0
+
+    - name: Describe topics that already existed
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-topics.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --command-config {{ kafka_config_dir }}/admin.properties
+          --describe --topic {{ item.name }}
+      become: true
+      become_user: "{{ kafka_user }}"
+      loop: "{{ kafka_topics }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: item.name in kafka_existing_topics.stdout_lines
+      register: kafka_topic_describe
+      changed_when: false
+
+    - name: Build the observed topic state
+      ansible.builtin.set_fact:
+        kafka_observed_topics: >-
+          {{ kafka_observed_topics | default({}) | combine({
+               item.item.name: {
+                 'partitions': (item.stdout | regex_search('PartitionCount:\s*(\d+)', '\1') | first | int),
+                 'replication_factor': (item.stdout | regex_search('ReplicationFactor:\s*(\d+)', '\1') | first | int)
+               }
+             }) }}
+      loop: "{{ kafka_topic_describe.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: not (item.skipped | default(false))
+
+    - name: Refuse to decrease partition counts
+      ansible.builtin.fail:
+        msg: >-
+          Topic '{{ item.name }}' has {{ kafka_observed_topics[item.name].partitions }}
+          partitions but {{ item.partitions }} were requested. Kafka cannot decrease a
+          partition count. Achieving it would mean deleting and recreating the topic,
+          which destroys its data and re-hashes every keyed message onto a different
+          partition, breaking per-key ordering for every consumer. Either restore
+          partitions to {{ kafka_observed_topics[item.name].partitions }} or more in
+          kafka_topics, or migrate to a new topic deliberately.
+      loop: "{{ kafka_topics }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - item.name in (kafka_observed_topics | default({}))
+        - item.partitions < kafka_observed_topics[item.name].partitions
+
+    - name: Refuse to silently change replication factor
+      ansible.builtin.fail:
+        msg: >-
+          Topic '{{ item.name }}' has replication factor
+          {{ kafka_observed_topics[item.name].replication_factor }} but
+          {{ item.replication_factor }} was requested. Changing it requires a partition
+          reassignment via kafka-reassign-partitions.sh, which moves data between
+          brokers and must be throttled and scheduled. This role will not fake it with
+          --alter. Run the reassignment deliberately, then update kafka_topics.
+      loop: "{{ kafka_topics }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - item.name in (kafka_observed_topics | default({}))
+        - item.replication_factor != kafka_observed_topics[item.name].replication_factor
+
+    - name: Increase partition counts
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-topics.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --command-config {{ kafka_config_dir }}/admin.properties
+          --alter --topic {{ item.name }} --partitions {{ item.partitions }}
+      become: true
+      become_user: "{{ kafka_user }}"
+      loop: "{{ kafka_topics }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - item.name in (kafka_observed_topics | default({}))
+        - item.partitions > kafka_observed_topics[item.name].partitions
+      register: kafka_partition_increase
+      changed_when: kafka_partition_increase.rc == 0
+
+    - name: Describe current topic configuration
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-configs.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --command-config {{ kafka_config_dir }}/admin.properties
+          --describe --entity-type topics --entity-name {{ item.name }}
+      become: true
+      become_user: "{{ kafka_user }}"
+      loop: "{{ kafka_topics }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: kafka_topic_configs
+      changed_when: false
+
+    - name: Reconcile topic configuration
+      ansible.builtin.include_tasks: topic_config.yml
+      loop: "{{ kafka_topic_configs.results }}"
+      loop_control:
+        loop_var: kafka_topic_state
+        label: "{{ kafka_topic_state.item.name }}"

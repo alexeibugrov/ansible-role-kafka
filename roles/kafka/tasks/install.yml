@@ -1,0 +1,87 @@
+---
+- name: Fetch the official checksum for the requested Kafka version
+  when: kafka_tarball_sha512 | length == 0
+  block:
+    - name: Download the published SHA-512 file
+      ansible.builtin.uri:
+        url: "{{ kafka_tarball_checksum_url }}"
+        return_content: true
+      register: kafka_published_checksum
+      changed_when: false
+
+    - name: Normalise the published checksum to a bare digest
+      ansible.builtin.set_fact:
+        kafka_tarball_sha512: >-
+          {{ kafka_published_checksum.content
+             | regex_replace('(?s)^.*?:', '')
+             | regex_replace('\s+', '')
+             | lower }}
+
+    - name: Assert the normalised checksum is a SHA-512 digest
+      ansible.builtin.assert:
+        that:
+          - kafka_tarball_sha512 | length == 128
+          - kafka_tarball_sha512 is match('^[0-9a-f]{128}$')
+        fail_msg: >-
+          Could not parse a SHA-512 digest out of {{ kafka_tarball_checksum_url }}
+          (got {{ kafka_tarball_sha512 | length }} characters). Refusing to install an
+          unverified artifact.
+        quiet: true
+
+- name: Download the Kafka distribution
+  ansible.builtin.get_url:
+    url: "{{ kafka_tarball_url }}"
+    dest: "{{ kafka_download_dir }}/{{ kafka_tarball_name }}"
+    checksum: "sha512:{{ kafka_tarball_sha512 }}"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: "0644"
+  register: kafka_download
+  failed_when: false
+
+- name: Download the Kafka distribution from the Apache archive
+  ansible.builtin.get_url:
+    url: "{{ kafka_archive_mirror }}/{{ kafka_version }}/{{ kafka_tarball_name }}"
+    dest: "{{ kafka_download_dir }}/{{ kafka_tarball_name }}"
+    checksum: "sha512:{{ kafka_tarball_sha512 }}"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: "0644"
+  when: kafka_download is failed
+
+- name: Create the versioned release directory
+  ansible.builtin.file:
+    path: "{{ kafka_release_dir }}"
+    state: directory
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: "0755"
+
+- name: Extract the Kafka distribution
+  ansible.builtin.unarchive:
+    src: "{{ kafka_download_dir }}/{{ kafka_tarball_name }}"
+    dest: "{{ kafka_release_dir }}"
+    remote_src: true
+    extra_opts:
+      - --strip-components=1
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    creates: "{{ kafka_release_dir }}/bin/kafka-server-start.sh"
+
+- name: Point the current symlink at the installed release
+  ansible.builtin.file:
+    src: "{{ kafka_release_dir }}"
+    dest: "{{ kafka_current_dir }}"
+    state: link
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+  notify: Restart Kafka
+
+- name: Install the log4j2 configuration
+  ansible.builtin.template:
+    src: log4j2.yaml.j2
+    dest: "{{ kafka_config_dir }}/log4j2.yaml"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: "0644"
+  notify: Restart Kafka

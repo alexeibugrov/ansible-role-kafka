@@ -1,0 +1,39 @@
+---
+- name: Reconcile application SCRAM principals
+  run_once: true
+  delegate_to: "{{ kafka_cluster_members[0].inventory_hostname }}"
+  block:
+    - name: List existing SCRAM principals
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-configs.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --command-config {{ kafka_config_dir }}/admin.properties
+          --describe --entity-type users
+      become: true
+      become_user: "{{ kafka_user }}"
+      register: kafka_existing_scram
+      changed_when: false
+
+    - name: Create missing SCRAM principals
+      ansible.builtin.command:
+        cmd: >-
+          {{ kafka_current_dir }}/bin/kafka-configs.sh
+          --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+          --command-config {{ kafka_config_dir }}/admin.properties
+          --alter
+          --add-config 'SCRAM-SHA-512=[iterations={{ kafka_scram_iterations }},password={{ item.password }}]'
+          --entity-type users --entity-name {{ item.name }}
+      become: true
+      become_user: "{{ kafka_user }}"
+      loop: "{{ kafka_scram_users }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: >-
+        kafka_scram_force_update | bool
+        or (kafka_existing_scram.stdout_lines
+            | select('search', "user-principal '" ~ item.name ~ "' are .*SCRAM-SHA-512")
+            | list | length == 0)
+      no_log: true
+      register: kafka_scram_create
+      changed_when: kafka_scram_create.rc == 0

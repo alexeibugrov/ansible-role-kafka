@@ -1,0 +1,15 @@
+---
+profile: production
+
+exclude_paths:
+  - .ansible/
+  - .local/
+  - .github/
+  - inventory/generated.yml
+  - terraform/
+
+skip_list:
+  - galaxy[version-incrementing]
+
+mock_roles:
+  - kafka

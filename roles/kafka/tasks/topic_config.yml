@@ -1,0 +1,17 @@
+---
+- name: Set the topic configuration to the declared value
+  ansible.builtin.command:
+    cmd: >-
+      {{ kafka_current_dir }}/bin/kafka-configs.sh
+      --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+      --command-config {{ kafka_config_dir }}/admin.properties
+      --alter --entity-type topics --entity-name {{ kafka_topic_state.item.name }}
+      --add-config {{ item.key }}={{ item.value }}
+  become: true
+  become_user: "{{ kafka_user }}"
+  loop: "{{ (kafka_topic_state.item.config | default({})) | dict2items }}"
+  loop_control:
+    label: "{{ kafka_topic_state.item.name }} {{ item.key }}={{ item.value }}"
+  when: kafka_topic_state.stdout is not search(item.key ~ '=' ~ (item.value | string) ~ '(,|\s|$)')
+  register: kafka_topic_config_set
+  changed_when: kafka_topic_config_set.rc == 0

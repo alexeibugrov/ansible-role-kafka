@@ -1,0 +1,38 @@
+---
+- name: Wait for the Kafka broker port to accept connections
+  ansible.builtin.wait_for:
+    host: "{{ kafka_bind_address }}"
+    port: "{{ kafka_broker_port }}"
+    state: started
+    timeout: "{{ kafka_health_check_retries * kafka_health_check_delay }}"
+
+- name: Wait for the broker to answer an authenticated API request
+  ansible.builtin.command:
+    cmd: >-
+      {{ kafka_current_dir }}/bin/kafka-broker-api-versions.sh
+      --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+      --command-config {{ kafka_config_dir }}/admin.properties
+  become: true
+  become_user: "{{ kafka_user }}"
+  register: kafka_api_probe
+  until: kafka_api_probe.rc == 0
+  retries: "{{ kafka_health_check_retries }}"
+  delay: "{{ kafka_health_check_delay }}"
+  changed_when: false
+
+- name: Verify the node is a member of a healthy KRaft quorum
+  ansible.builtin.command:
+    cmd: >-
+      {{ kafka_current_dir }}/bin/kafka-metadata-quorum.sh
+      --bootstrap-server {{ kafka_advertised_address }}:{{ kafka_broker_port }}
+      --command-config {{ kafka_config_dir }}/admin.properties
+      describe --status
+  become: true
+  become_user: "{{ kafka_user }}"
+  register: kafka_quorum_probe
+  until:
+    - kafka_quorum_probe.rc == 0
+    - "'LeaderId' in kafka_quorum_probe.stdout"
+  retries: "{{ kafka_health_check_retries }}"
+  delay: "{{ kafka_health_check_delay }}"
+  changed_when: false

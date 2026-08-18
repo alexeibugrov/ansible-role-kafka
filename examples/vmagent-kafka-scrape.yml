@@ -1,0 +1,36 @@
+---
+global:
+  scrape_interval: 30s
+  external_labels:
+    cluster: analytics
+
+scrape_configs:
+  - job_name: kafka
+    metrics_path: /metrics
+    scrape_interval: 30s
+    scrape_timeout: 10s
+
+    static_configs:
+      - targets:
+          - kafka-1:9404
+          - kafka-2:9404
+          - kafka-3:9404
+        labels:
+          service: kafka
+          env: dev
+
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: '([^:]+):.*'
+        target_label: instance
+        replacement: '$1'
+
+      - source_labels: [instance]
+        regex: 'kafka-([0-9]+)'
+        target_label: node_id
+        replacement: '$1'
+
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'kafka_log_(size|logendoffset|logstartoffset|numlogsegments)'
+        action: drop

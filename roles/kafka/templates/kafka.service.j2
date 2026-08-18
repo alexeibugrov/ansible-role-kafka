@@ -1,0 +1,45 @@
+{{ ansible_managed | comment }}
+[Unit]
+Description=Apache Kafka {{ kafka_version }} (KRaft {{ kafka_process_roles }})
+Documentation=https://kafka.apache.org/documentation/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User={{ kafka_user }}
+Group={{ kafka_group }}
+
+Environment="KAFKA_HEAP_OPTS={{ kafka_heap_opts }}"
+Environment="KAFKA_JVM_PERFORMANCE_OPTS={{ kafka_jvm_performance_opts | trim }}"
+{% if kafka_metrics_enabled %}
+Environment="KAFKA_OPTS=-javaagent:{{ kafka_jmx_exporter_jar }}={{ kafka_jmx_exporter_bind_address }}:{{ kafka_jmx_exporter_port }}:{{ kafka_jmx_exporter_config }}"
+{% endif %}
+Environment="KAFKA_LOG4J_OPTS=-Dlog4j2.configurationFile=file:{{ kafka_config_dir }}/log4j2.yaml"
+
+Environment="KAFKA_JMX_OPTS={{ kafka_jmx_opts }}"
+
+ExecStart={{ kafka_current_dir }}/bin/kafka-server-start.sh {{ kafka_config_dir }}/server.properties
+ExecStop={{ kafka_current_dir }}/bin/kafka-server-stop.sh
+
+Restart={{ kafka_systemd_restart }}
+RestartSec={{ kafka_systemd_restart_sec }}
+
+KillSignal=SIGTERM
+TimeoutStopSec={{ kafka_systemd_timeout_stop_sec }}
+SendSIGKILL=yes
+
+LimitNOFILE={{ kafka_systemd_limit_nofile }}
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ReadWritePaths={{ kafka_log_dirs | join(' ') }} {{ kafka_data_dir }}
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={{ kafka_service_name }}
+
+[Install]
+WantedBy=multi-user.target
